@@ -11,6 +11,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
 
@@ -28,7 +29,9 @@ jobs:
         run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
 
       - name: Build
-        run: pio run | tee pio.log
+        run: |
+          pio run 2>&1 | tee pio.log
+          exit ${PIPESTATUS[0]}
 
       - name: Upload firmware.bin
         uses: actions/upload-artifact@v4
