@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+
+# Check if clang-format is available
+command -v clang-format >/dev/null 2>&1 || {
+    printf "'clang-format' not found in current environment\n"
+    printf "install 'clang', 'clang-tools', or 'clang-format' depending on your distro/os and tooling requirements\n"
+    exit 1
+}
+
+# Configuration: Standard arguments for clang-format
+STYLE_ARGS="-style=file -i"
+
+# --- Main Logic ---
+
+if [[ "$1" == "-g" ]]; then
+    # Mode: Format all modified files (staged and unstaged)
+
+    # Use 'git ls-files' to get a list of all files with pending changes:
+    # --modified: files tracked by git that have been modified (staged or unstaged)
+    # --exclude-standard: ignores files in .gitignore
+    git ls-files --modified --exclude-standard \
+        | grep -E '\.(c|cpp|h|hpp)$' \
+        | xargs -r clang-format $STYLE_ARGS
+
+    # NOTE: We skip the 'git add' step from before.
+    # When running on unstaged files, 'clang-format -i' modifies them
+    # in the working directory, where they remain unstaged (M).
+
+else
+    # Executes original working command directly.
+    find src lib \( -name "*.c" -o -name "*.cpp" -o -name "*.h" -o -name "*.hpp" \) -exec clang-format $STYLE_ARGS {} +
+
+fi

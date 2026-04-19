@@ -1,0 +1,9 @@
+{
+  "name": "Epub",
+  "version": "1.0.0",
+  "description": "EPUB 2/3 parsing, CSS, TOC, and page layout",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "src"
+  }
+}

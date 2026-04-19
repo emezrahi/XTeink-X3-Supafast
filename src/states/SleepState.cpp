@@ -1,0 +1,277 @@
+#include "SleepState.h"
+
+#include <Arduino.h>
+#include <LittleFS.h>
+#include <Bitmap.h>
+#include "GpioUtils.h"
+#include <CoverHelpers.h>
+#include <EInkDisplay.h>
+#include <Epub.h>
+#include <Fb2.h>
+#include <FsHelpers.h>
+#include <GfxRenderer.h>
+#include <Html.h>
+#include <InputManager.h>
+#include <Logging.h>
+#include <Markdown.h>
+#include <SDCardManager.h>
+#include <SPI.h>
+#include <Txt.h>
+#include <Xtc.h>
+#include <driver/gpio.h>
+#include <esp_sleep.h>
+
+#include <string>
+#include <vector>
+
+#include "../ThemeManager.h"
+#include "../config.h"
+#include "../core/Core.h"
+#include "../images/PixelpaperLogo.h"
+
+extern InputManager inputManager;
+extern uint16_t rtcPowerButtonDurationMs;
+extern void showSleepSequence();
+
+#define TAG "SLEEP"
+
+namespace pixelpaper {
+
+SleepState::SleepState(GfxRenderer& renderer) : renderer_(renderer) {}
+
+void SleepState::enter(Core& core) {
+  LOG_INF(TAG, "SleepState::enter - rendering sleep screen");
+
+  // Show sleep animation sequence (ends on blank white screen)
+  showSleepSequence();
+
+  // Save power button duration to RTC memory for wake-up verification
+  rtcPowerButtonDurationMs = core.settings.getPowerButtonDuration();
+
+  // Put display into low-power mode after rendering
+  core.display.sleep();
+
+  // Shutdown network if it was used
+  if (core.network.isInitialized()) {
+    core.network.shutdown();
+  }
+
+  // Power down peripherals before deep sleep to minimize current draw
+  SdMan.end();
+  LittleFS.end();
+  SPI.end();
+
+  // Configure wake-up source (power button)
+  esp_deep_sleep_enable_gpio_wakeup(1ULL << InputManager::POWER_BUTTON_PIN, ESP_GPIO_WAKEUP_GPIO_LOW);
+
+  // Wait for power button release before entering deep sleep
+  waitForPowerRelease();
+
+  disableGpioPullsForSleep();
+
+  LOG_INF(TAG, "Entering deep sleep");
+
+  // Enter deep sleep - this never returns
+  esp_deep_sleep_start();
+}
+
+void SleepState::exit(Core& core) {
+  // This should never be called - enter() calls esp_deep_sleep_start() and never returns
+  LOG_ERR(TAG, "SleepState::exit (unexpected)");
+}
+
+StateTransition SleepState::update(Core& core) {
+  // This should never be called - enter() calls esp_deep_sleep_start() and never returns
+  LOG_ERR(TAG, "SleepState::update (unexpected - enter() should not return)");
+  return StateTransition::stay(StateId::Sleep);
+}
+
+void SleepState::renderDefaultSleepScreen(const Core& core) const {
+  const auto pageWidth = renderer_.getScreenWidth();
+  const auto pageHeight = renderer_.getScreenHeight();
+
+  // Fixed colors (white bg, black text) — independent of active theme.
+  // invertScreen() below handles dark/light based on sleep setting only.
+  renderer_.clearScreen(0xFF);
+  renderer_.drawImage(PixelpaperLogo, (pageWidth + 128) / 2, (pageHeight - 128) / 2, 128, 128);
+  renderer_.drawCenteredText(THEME.uiFontId, pageHeight / 2 + 70, "Pixelpaper", true, BOLD);
+  renderer_.drawCenteredText(THEME.smallFontId, pageHeight / 2 + 110, "SLEEPING", true);
+
+  // Make sleep screen dark unless light is selected in settings
+  if (core.settings.sleepScreen != Settings::SleepLight) {
+    renderer_.invertScreen();
+  }
+
+  renderer_.displayBuffer(EInkDisplay::HALF_REFRESH);
+}
+
+void SleepState::renderCustomSleepScreen(const Core& core) const {
+  // Check if we have a /sleep directory
+  auto dir = SdMan.open("/sleep");
+  if (dir && dir.isDirectory()) {
+    std::vector<std::string> files;
+    char name[256];  // FAT32 LFN max is 255 chars; reduced from 500 to save stack
+    // collect all valid BMP files
+    for (auto file = dir.openNextFile(); file; file = dir.openNextFile()) {
+      if (file.isDirectory()) {
+        file.close();
+        continue;
+      }
+      file.getName(name, sizeof(name));
+      auto filename = std::string(name);
+      if (filename[0] == '.') {
+        file.close();
+        continue;
+      }
+
+      if (!FsHelpers::isBmpFile(filename)) {
+        LOG_DBG(TAG, "Skipping non-.bmp file name: %s", name);
+        file.close();
+        continue;
+      }
+      Bitmap bitmap(file);
+      if (bitmap.parseHeaders() != BmpReaderError::Ok) {
+        LOG_DBG(TAG, "Skipping invalid BMP file: %s", name);
+        file.close();
+        continue;
+      }
+      files.emplace_back(filename);
+      file.close();
+    }
+    const auto numFiles = files.size();
+    if (numFiles > 0) {
+      // Generate a random number between 0 and numFiles-1
+      const auto randomFileIndex = random(numFiles);
+      const auto filename = "/sleep/" + files[randomFileIndex];
+      FsFile file;
+      if (SdMan.openFileForRead("SLP", filename, file)) {
+        LOG_INF(TAG, "Randomly loading: /sleep/%s", files[randomFileIndex].c_str());
+        delay(100);
+        Bitmap bitmap(file, true);
+        if (bitmap.parseHeaders() == BmpReaderError::Ok) {
+          renderBitmapSleepScreen(bitmap);
+          dir.close();
+          return;
+        }
+      }
+    }
+  }
+  if (dir) dir.close();
+
+  // Look for sleep.bmp on the root of the sd card to determine if we should
+  // render a custom sleep screen instead of the default.
+  FsFile file;
+  if (SdMan.openFileForRead("SLP", "/sleep.bmp", file)) {
+    Bitmap bitmap(file, true);
+    if (bitmap.parseHeaders() == BmpReaderError::Ok) {
+      LOG_INF(TAG, "Loading: /sleep.bmp");
+      renderBitmapSleepScreen(bitmap);
+      return;
+    }
+  }
+
+  renderDefaultSleepScreen(core);
+}
+
+void SleepState::renderCoverSleepScreen(Core& core) const {
+  if (core.settings.lastBookPath[0] == '\0') {
+    return renderDefaultSleepScreen(core);
+  }
+
+  std::string coverBmpPath;
+  const char* bookPath = core.settings.lastBookPath;
+
+  // Generate cover BMP based on file type (creates temporary wrapper to generate cover)
+  if (FsHelpers::isXtcFile(bookPath)) {
+    Xtc xtc(bookPath, PIXELPAPER_CACHE_DIR);
+    if (xtc.load() && xtc.generateCoverBmp()) {
+      coverBmpPath = xtc.getCoverBmpPath();
+    }
+  } else if (FsHelpers::isTxtFile(bookPath)) {
+    Txt txt(bookPath, PIXELPAPER_CACHE_DIR);
+    if (txt.load() && txt.generateCoverBmp(true)) {
+      coverBmpPath = txt.getCoverBmpPath();
+    }
+  } else if (FsHelpers::isMarkdownFile(bookPath)) {
+    Markdown md(bookPath, PIXELPAPER_CACHE_DIR);
+    if (md.load() && md.generateCoverBmp(true)) {
+      coverBmpPath = md.getCoverBmpPath();
+    }
+  } else if (FsHelpers::isEpubFile(bookPath)) {
+    Epub epub(bookPath, PIXELPAPER_CACHE_DIR);
+    if (epub.load() && epub.generateCoverBmp(true)) {
+      coverBmpPath = epub.getCoverBmpPath();
+    }
+  } else if (FsHelpers::isFb2File(bookPath)) {
+    Fb2 fb2(bookPath, PIXELPAPER_CACHE_DIR);
+    if (fb2.load() && fb2.generateCoverBmp(true)) {
+      coverBmpPath = fb2.getCoverBmpPath();
+    }
+  } else if (FsHelpers::isHtmlFile(bookPath)) {
+    Html html(bookPath, PIXELPAPER_CACHE_DIR);
+    if (html.load() && html.generateCoverBmp(true)) {
+      coverBmpPath = html.getCoverBmpPath();
+    }
+  }
+
+  if (coverBmpPath.empty()) {
+    LOG_DBG(TAG, "No cover BMP available");
+    return renderDefaultSleepScreen(core);
+  }
+
+  FsFile file;
+  if (SdMan.openFileForRead("SLP", coverBmpPath, file)) {
+    Bitmap bitmap(file);
+    if (bitmap.parseHeaders() == BmpReaderError::Ok) {
+      renderBitmapSleepScreen(bitmap);
+      return;
+    }
+  }
+
+  renderDefaultSleepScreen(core);
+}
+
+void SleepState::renderBitmapSleepScreen(const Bitmap& bitmap) const {
+  const auto pageWidth = renderer_.getScreenWidth();
+  const auto pageHeight = renderer_.getScreenHeight();
+
+  auto rect = CoverHelpers::calculateCenteredRect(bitmap.getWidth(), bitmap.getHeight(), 0, 0, pageWidth, pageHeight);
+
+  renderer_.clearScreen();
+  renderer_.drawBitmap(bitmap, rect.x, rect.y, rect.width, rect.height);
+  renderer_.displayBuffer(EInkDisplay::HALF_REFRESH);
+
+  if (bitmap.hasGreyscale()) {
+    bitmap.rewindToData();
+    renderer_.clearScreen(0x00);
+    renderer_.setRenderMode(GfxRenderer::GRAYSCALE_LSB);
+    renderer_.drawBitmap(bitmap, rect.x, rect.y, rect.width, rect.height);
+    renderer_.copyGrayscaleLsbBuffers();
+
+    bitmap.rewindToData();
+    renderer_.clearScreen(0x00);
+    renderer_.setRenderMode(GfxRenderer::GRAYSCALE_MSB);
+    renderer_.drawBitmap(bitmap, rect.x, rect.y, rect.width, rect.height);
+    renderer_.copyGrayscaleMsbBuffers();
+
+    renderer_.displayGrayBuffer();
+    renderer_.setRenderMode(GfxRenderer::BW);
+
+    // Restore BW frame buffer and clean up RED RAM so e-ink controller
+    // doesn't show grayscale residue as ghosting during deep sleep
+    bitmap.rewindToData();
+    renderer_.clearScreen();
+    renderer_.drawBitmap(bitmap, rect.x, rect.y, rect.width, rect.height);
+    renderer_.cleanupGrayscaleWithFrameBuffer();
+  }
+}
+
+void SleepState::waitForPowerRelease() const {
+  inputManager.update();
+  while (inputManager.isPressed(InputManager::BTN_POWER)) {
+    delay(50);
+    inputManager.update();
+  }
+}
+
+}  // namespace pixelpaper

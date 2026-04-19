@@ -1,0 +1,131 @@
+#pragma once
+
+#include <cstdint>
+#include <cstring>
+
+#include "config.h"
+
+/**
+ * Theme configuration for Pixelpaper UI.
+ *
+ * Controls colors, fonts, and layout for all activities.
+ * Since e-ink is binary (black/white), colors are represented as booleans:
+ * - true = black (default ink color)
+ * - false = white (inverted/background color)
+ */
+struct Theme {
+  // Theme metadata
+  char displayName[32];  // Human-readable name for settings UI
+
+  // Color scheme
+  bool invertedMode;  // Global dark/light mode (true = dark background)
+
+  // Selection styles
+  bool selectionFillBlack;  // Selection highlight fill color
+  bool selectionTextBlack;  // Text color on selection
+
+  // Text styles
+  bool primaryTextBlack;    // Normal text color
+  bool secondaryTextBlack;  // Secondary/dimmed text color
+
+  // Background
+  uint8_t backgroundColor;  // Screen clear color (0x00 = black, 0xFF = white)
+
+  // Layout margins and spacing
+  uint8_t screenMarginTop;
+  uint8_t screenMarginSide;
+  uint8_t itemHeight;
+  uint8_t itemSpacing;
+  uint8_t itemPaddingX;      // Horizontal padding inside items
+  uint8_t itemValuePadding;  // Right padding for values
+
+  // Font IDs
+  int uiFontId;
+  int smallFontId;
+  int readerFontIdXSmall;
+  int readerFontId;
+  int readerFontIdMedium;
+  int readerFontIdLarge;
+
+  // External font family names (empty = use builtin)
+  char readerFontFamilyXSmall[32];
+  char readerFontFamilySmall[32];
+  char readerFontFamilyMedium[32];
+  char readerFontFamilyLarge[32];
+};
+
+/**
+ * Get default light theme - used as default when no theme file exists.
+ */
+inline Theme getBuiltinLightTheme() {
+  Theme theme = {};
+  strncpy(theme.displayName, "corex-pixelpage Light", sizeof(theme.displayName));
+  theme.invertedMode = false;
+  theme.selectionFillBlack = true;
+  theme.selectionTextBlack = false;
+  theme.primaryTextBlack = true;
+  theme.secondaryTextBlack = true;
+  theme.backgroundColor = 0xFF;
+  theme.screenMarginTop = 9;
+  theme.screenMarginSide = 6;
+  theme.itemHeight = 28;
+  theme.itemSpacing = 2;
+  theme.itemPaddingX = 8;
+  theme.itemValuePadding = 20;
+  theme.uiFontId = SMALL_FONT_ID;
+  theme.smallFontId = SMALL_FONT_ID;
+  theme.readerFontIdXSmall = READER_FONT_ID_XSMALL;
+  theme.readerFontId = READER_FONT_ID;
+  theme.readerFontIdMedium = READER_FONT_ID_MEDIUM;
+  theme.readerFontIdLarge = READER_FONT_ID_LARGE;
+  theme.readerFontFamilyXSmall[0] = '\0';
+  theme.readerFontFamilySmall[0] = '\0';
+  theme.readerFontFamilyMedium[0] = '\0';
+  theme.readerFontFamilyLarge[0] = '\0';
+  return theme;
+}
+
+/**
+ * Get default dark theme - inverted colors.
+ */
+inline Theme getBuiltinDarkTheme() {
+  Theme theme = {};
+  strncpy(theme.displayName, "corex-pixelpage Dark", sizeof(theme.displayName));
+  theme.invertedMode = true;
+  theme.selectionFillBlack = false;
+  theme.selectionTextBlack = true;
+  theme.primaryTextBlack = false;
+  theme.secondaryTextBlack = false;
+  theme.backgroundColor = 0x00;
+  theme.screenMarginTop = 9;
+  theme.screenMarginSide = 6;
+  theme.itemHeight = 28;
+  theme.itemSpacing = 2;
+  theme.itemPaddingX = 8;
+  theme.itemValuePadding = 20;
+  theme.uiFontId = SMALL_FONT_ID;
+  theme.smallFontId = SMALL_FONT_ID;
+  theme.readerFontIdXSmall = READER_FONT_ID_XSMALL;
+  theme.readerFontId = READER_FONT_ID;
+  theme.readerFontIdMedium = READER_FONT_ID_MEDIUM;
+  theme.readerFontIdLarge = READER_FONT_ID_LARGE;
+  theme.readerFontFamilyXSmall[0] = '\0';
+  theme.readerFontFamilySmall[0] = '\0';
+  theme.readerFontFamilyMedium[0] = '\0';
+  theme.readerFontFamilyLarge[0] = '\0';
+  return theme;
+}
+
+/**
+ * Get builtin system theme (corex-pixelpage).
+ */
+inline Theme getBuiltinCorexPixelpageTheme() {
+  Theme theme = getBuiltinDarkTheme();
+  strncpy(theme.displayName, "corex-pixelpage", sizeof(theme.displayName));
+  return theme;
+}
+
+// For use in initialization
+#define BUILTIN_LIGHT_THEME getBuiltinLightTheme()
+#define BUILTIN_DARK_THEME getBuiltinDarkTheme()
+#define BUILTIN_COREX_THEME getBuiltinCorexPixelpageTheme()

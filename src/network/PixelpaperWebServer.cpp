@@ -1,0 +1,515 @@
+#include "PixelpaperWebServer.h"
+
+#include <Arduino.h>
+#include <ArduinoJson.h>
+#include <FsHelpers.h>
+#include <Logging.h>
+#include <SDCardManager.h>
+#include <WiFi.h>
+#include <esp_heap_caps.h>
+
+#include "../config.h"
+#include "html/AppPageHtml.generated.h"
+
+#define TAG "WEBSERVER"
+
+namespace pixelpaper {
+
+namespace {
+String normalizeLegacyFontsPath(String path) {
+  if (!path.startsWith("/")) {
+    path = "/" + path;
+  }
+  if (path.length() > 1 && path.endsWith("/")) {
+    path = path.substring(0, path.length() - 1);
+  }
+
+  if (path == "/config/fonts") {
+    return CONFIG_FONTS_DIR;
+  }
+
+  static constexpr size_t kLegacyPrefixLen = sizeof("/config/fonts/") - 1;
+  if (path.startsWith("/config/fonts/")) {
+    return String(CONFIG_FONTS_DIR) + path.substring(kLegacyPrefixLen - 1);
+  }
+
+  return path;
+}
+}  // namespace
+
+static void sendGzipHtml(WebServer* server, const char* data, size_t len) {
+  server->sendHeader("Content-Encoding", "gzip");
+  server->send_P(200, "text/html", data, len);
+}
+
+bool PixelpaperWebServer::flushUploadBuffer() {
+  if (upload_.bufferPos > 0 && upload_.file) {
+    const size_t written = upload_.file.write(upload_.buffer.data(), upload_.bufferPos);
+    if (written != upload_.bufferPos) {
+      upload_.bufferPos = 0;
+      return false;
+    }
+    upload_.bufferPos = 0;
+  }
+  return true;
+}
+
+PixelpaperWebServer::PixelpaperWebServer() = default;
+
+PixelpaperWebServer::~PixelpaperWebServer() { stop(); }
+
+void PixelpaperWebServer::begin() {
+  if (running_) {
+    LOG_DBG(TAG, "Server already running");
+    return;
+  }
+
+  // Check network connection
+  wifi_mode_t wifiMode = WiFi.getMode();
+  bool isStaConnected = (wifiMode & WIFI_MODE_STA) && (WiFi.status() == WL_CONNECTED);
+  bool isInApMode = (wifiMode & WIFI_MODE_AP);
+
+  if (!isStaConnected && !isInApMode) {
+    LOG_ERR(TAG, "Cannot start - no network connection");
+    return;
+  }
+
+  apMode_ = isInApMode;
+
+  LOG_INF(TAG, "Creating server on port %d (free heap: %d)", port_, ESP.getFreeHeap());
+
+  server_.reset(new WebServer(port_));
+  if (!server_) {
+    LOG_ERR(TAG, "Failed to create WebServer");
+    return;
+  }
+
+  // Setup routes
+  server_->on("/", HTTP_GET, [this] { handleRoot(); });
+  server_->on("/api/status", HTTP_GET, [this] { handleStatus(); });
+  server_->on("/api/files", HTTP_GET, [this] { handleFileListData(); });
+  server_->on("/download", HTTP_GET, [this] { handleDownload(); });
+  server_->on("/upload", HTTP_POST, [this] { handleUploadPost(); }, [this] { handleUpload(); });
+  server_->on("/mkdir", HTTP_POST, [this] { handleCreateFolder(); });
+  server_->on("/delete", HTTP_POST, [this] { handleDelete(); });
+  server_->on("/rename", HTTP_POST, [this] { handleRename(); });
+  server_->onNotFound([this] { handleNotFound(); });
+
+  server_->begin();
+  running_ = true;
+
+  String ipAddr = apMode_ ? WiFi.softAPIP().toString() : WiFi.localIP().toString();
+  LOG_INF(TAG, "Server started at http://%s/", ipAddr.c_str());
+}
+
+void PixelpaperWebServer::stop() {
+  if (!running_ || !server_) {
+    return;
+  }
+
+  LOG_INF(TAG, "Stopping server (free heap: %d)", ESP.getFreeHeap());
+
+  running_ = false;
+  delay(100);
+
+  server_->stop();
+  delay(50);
+  server_.reset();
+
+  // Clear upload state
+  if (upload_.file) {
+    upload_.file.close();
+  }
+  upload_.fileName = "";
+  upload_.path = "/";
+  upload_.size = 0;
+  upload_.success = false;
+  upload_.error = "";
+  upload_.bufferPos = 0;
+  upload_.buffer.clear();
+  upload_.buffer.shrink_to_fit();
+
+  LOG_INF(TAG, "Server stopped (free heap: %d)", ESP.getFreeHeap());
+}
+
+void PixelpaperWebServer::handleClient() {
+  if (!running_ || !server_) {
+    return;
+  }
+  server_->handleClient();
+}
+
+void PixelpaperWebServer::handleRoot() { sendGzipHtml(server_.get(), AppPageHtml, AppPageHtmlCompressedSize); }
+
+void PixelpaperWebServer::handleNotFound() { server_->send(404, "text/plain", "404 Not Found"); }
+
+void PixelpaperWebServer::handleStatus() {
+  String ipAddr = apMode_ ? WiFi.softAPIP().toString() : WiFi.localIP().toString();
+
+  char json[256];
+  snprintf(json, sizeof(json),
+           "{\"version\":\"%s\",\"ip\":\"%s\",\"mode\":\"%s\",\"rssi\":%d,\"freeHeap\":%u,\"uptime\":%lu}",
+           PIXELPAPER_VERSION, ipAddr.c_str(), apMode_ ? "AP" : "STA", apMode_ ? 0 : WiFi.RSSI(), ESP.getFreeHeap(),
+           millis() / 1000);
+
+  server_->send(200, "application/json", json);
+}
+
+void PixelpaperWebServer::handleFileListData() {
+  String currentPath = "/";
+  if (server_->hasArg("path")) {
+    currentPath = normalizeLegacyFontsPath(server_->arg("path"));
+  }
+
+  FsFile root = SdMan.open(currentPath.c_str());
+  if (!root || !root.isDirectory()) {
+    server_->send(404, "application/json", "[]");
+    if (root) root.close();
+    return;
+  }
+
+  server_->setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server_->send(200, "application/json", "");
+  server_->sendContent("[");
+
+  char name[256];
+  bool seenFirst = false;
+  FsFile file = root.openNextFile();
+
+  while (file) {
+    file.getName(name, sizeof(name));
+
+    // Skip hidden items
+    if (name[0] != '.' && !FsHelpers::isHiddenFsItem(name)) {
+      JsonDocument doc;
+      doc["name"] = name;
+      doc["isDirectory"] = file.isDirectory();
+
+      if (file.isDirectory()) {
+        doc["size"] = 0;
+        doc["isEpub"] = false;
+      } else {
+        doc["size"] = file.size();
+        doc["isEpub"] = FsHelpers::isEpubFile(name);
+      }
+
+      char output[512];
+      size_t written = serializeJson(doc, output, sizeof(output));
+      if (written < sizeof(output)) {
+        if (seenFirst) {
+          server_->sendContent(",");
+        } else {
+          seenFirst = true;
+        }
+        server_->sendContent(output);
+      }
+    }
+
+    file.close();
+    file = root.openNextFile();
+  }
+
+  root.close();
+  server_->sendContent("]");
+  server_->sendContent("");
+}
+
+void PixelpaperWebServer::handleUpload() {
+  if (!running_ || !server_) return;
+
+  HTTPUpload& upload = server_->upload();
+
+  if (upload.status == UPLOAD_FILE_START) {
+    upload_.fileName = upload.filename;
+    upload_.size = 0;
+    upload_.success = false;
+    upload_.error = "";
+    upload_.bufferPos = 0;
+    if (heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < UploadState::BUFFER_SIZE * 2) {
+      upload_.error = "Insufficient memory for upload";
+      return;
+    }
+    upload_.buffer.resize(UploadState::BUFFER_SIZE);
+
+    if (server_->hasArg("path")) {
+      upload_.path = normalizeLegacyFontsPath(server_->arg("path"));
+    } else {
+      upload_.path = "/";
+    }
+
+    LOG_INF(TAG, "Upload start: %s to %s", upload_.fileName.c_str(), upload_.path.c_str());
+
+    String filePath = upload_.path;
+    if (!filePath.endsWith("/")) filePath += "/";
+    filePath += upload_.fileName;
+
+    if (!FsHelpers::isSupportedBookFile(upload_.fileName.c_str()) &&
+        !FsHelpers::isImageFile(upload_.fileName.c_str()) &&
+        !FsHelpers::hasExtension(upload_.fileName.c_str(), ".epdfont") &&
+        !FsHelpers::hasExtension(upload_.fileName.c_str(), ".bin") &&
+        !FsHelpers::hasExtension(upload_.fileName.c_str(), ".theme")) {
+      upload_.error = "Unsupported file type";
+      LOG_ERR(TAG, "Rejected upload: %s (unsupported type)", upload_.fileName.c_str());
+      return;
+    }
+
+    if (SdMan.exists(filePath.c_str())) {
+      SdMan.remove(filePath.c_str());
+    }
+
+    if (!SdMan.openFileForWrite("WEB", filePath, upload_.file)) {
+      upload_.error = "Failed to create file";
+      LOG_ERR(TAG, "Failed to create: %s", filePath.c_str());
+      return;
+    }
+
+  } else if (upload.status == UPLOAD_FILE_WRITE) {
+    if (upload_.file && upload_.error.isEmpty()) {
+      const uint8_t* data = upload.buf;
+      size_t remaining = upload.currentSize;
+
+      while (remaining > 0) {
+        size_t space = UploadState::BUFFER_SIZE - upload_.bufferPos;
+        size_t toCopy = remaining < space ? remaining : space;
+        memcpy(upload_.buffer.data() + upload_.bufferPos, data, toCopy);
+        upload_.bufferPos += toCopy;
+        data += toCopy;
+        remaining -= toCopy;
+
+        if (upload_.bufferPos >= UploadState::BUFFER_SIZE) {
+          if (!flushUploadBuffer()) {
+            upload_.error = "Write failed - disk full?";
+            upload_.file.close();
+            return;
+          }
+        }
+      }
+
+      upload_.size += upload.currentSize;
+    }
+
+  } else if (upload.status == UPLOAD_FILE_END) {
+    if (upload_.file) {
+      if (upload_.error.isEmpty() && !flushUploadBuffer()) {
+        upload_.error = "Write failed - disk full?";
+      }
+      upload_.file.close();
+      if (upload_.error.isEmpty()) {
+        upload_.success = true;
+        LOG_INF(TAG, "Upload complete: %s (%zu bytes)", upload_.fileName.c_str(), upload_.size);
+      }
+    }
+    upload_.buffer.clear();
+    upload_.buffer.shrink_to_fit();
+
+  } else if (upload.status == UPLOAD_FILE_ABORTED) {
+    upload_.bufferPos = 0;
+    upload_.buffer.clear();
+    upload_.buffer.shrink_to_fit();
+    if (upload_.file) {
+      upload_.file.close();
+      String filePath = upload_.path;
+      if (!filePath.endsWith("/")) filePath += "/";
+      filePath += upload_.fileName;
+      SdMan.remove(filePath.c_str());
+    }
+    upload_.error = "Upload aborted";
+    LOG_ERR(TAG, "Upload aborted");
+  }
+}
+
+void PixelpaperWebServer::handleUploadPost() {
+  if (upload_.success) {
+    server_->send(200, "text/plain", "File uploaded: " + upload_.fileName);
+  } else {
+    String error = upload_.error.isEmpty() ? "Unknown error" : upload_.error;
+    server_->send(400, "text/plain", error);
+  }
+}
+
+void PixelpaperWebServer::handleCreateFolder() {
+  if (!server_->hasArg("name")) {
+    server_->send(400, "text/plain", "Missing folder name");
+    return;
+  }
+
+  String folderName = server_->arg("name");
+  if (folderName.isEmpty()) {
+    server_->send(400, "text/plain", "Folder name cannot be empty");
+    return;
+  }
+
+  String parentPath = "/";
+  if (server_->hasArg("path")) {
+    parentPath = normalizeLegacyFontsPath(server_->arg("path"));
+  }
+
+  String folderPath = parentPath;
+  if (!folderPath.endsWith("/")) folderPath += "/";
+  folderPath += folderName;
+
+  if (SdMan.exists(folderPath.c_str())) {
+    server_->send(400, "text/plain", "Folder already exists");
+    return;
+  }
+
+  if (SdMan.mkdir(folderPath.c_str())) {
+    LOG_INF(TAG, "Created folder: %s", folderPath.c_str());
+    server_->send(200, "text/plain", "Folder created");
+  } else {
+    server_->send(500, "text/plain", "Failed to create folder");
+  }
+}
+
+void PixelpaperWebServer::handleDelete() {
+  if (!server_->hasArg("path")) {
+    server_->send(400, "text/plain", "Missing path");
+    return;
+  }
+
+  String itemPath = normalizeLegacyFontsPath(server_->arg("path"));
+  String itemType = server_->hasArg("type") ? server_->arg("type") : "file";
+
+  if (itemPath.isEmpty() || itemPath == "/") {
+    server_->send(400, "text/plain", "Cannot delete root");
+    return;
+  }
+
+  if (!itemPath.startsWith("/")) {
+    itemPath = "/" + itemPath;
+  }
+
+  // Security: prevent deletion of hidden/system files
+  String itemName = itemPath.substring(itemPath.lastIndexOf('/') + 1);
+  if (itemName.startsWith(".") || FsHelpers::isHiddenFsItem(itemName.c_str())) {
+    server_->send(403, "text/plain", "Cannot delete system files");
+    return;
+  }
+
+  if (!SdMan.exists(itemPath.c_str())) {
+    server_->send(404, "text/plain", "Item not found");
+    return;
+  }
+
+  bool success = false;
+  if (itemType == "folder") {
+    FsFile dir = SdMan.open(itemPath.c_str());
+    if (dir && dir.isDirectory()) {
+      FsFile entry = dir.openNextFile();
+      if (entry) {
+        entry.close();
+        dir.close();
+        server_->send(400, "text/plain", "Folder not empty");
+        return;
+      }
+      dir.close();
+    }
+    success = SdMan.rmdir(itemPath.c_str());
+  } else {
+    success = SdMan.remove(itemPath.c_str());
+  }
+
+  if (success) {
+    LOG_INF(TAG, "Deleted: %s", itemPath.c_str());
+    server_->send(200, "text/plain", "Deleted");
+  } else {
+    server_->send(500, "text/plain", "Failed to delete");
+  }
+}
+
+void PixelpaperWebServer::handleDownload() {
+  if (!server_->hasArg("path")) {
+    server_->send(400, "text/plain", "Missing path");
+    return;
+  }
+
+  String filePath = normalizeLegacyFontsPath(server_->arg("path"));
+  if (filePath.isEmpty() || !filePath.startsWith("/") || filePath.indexOf("..") >= 0) {
+    server_->send(400, "text/plain", "Invalid path");
+    return;
+  }
+
+  // Security: block hidden/system files and dot-prefix paths
+  String fileName = filePath.substring(filePath.lastIndexOf('/') + 1);
+  if (fileName.startsWith(".") || FsHelpers::isHiddenFsItem(fileName.c_str())) {
+    server_->send(403, "text/plain", "Access denied");
+    return;
+  }
+
+  FsFile file = SdMan.open(filePath.c_str());
+  if (!file || file.isDirectory()) {
+    if (file) file.close();
+    server_->send(404, "text/plain", "File not found");
+    return;
+  }
+
+  size_t fileSize = file.size();
+
+  server_->sendHeader("Content-Disposition", "attachment; filename=\"" + fileName + "\"");
+  server_->setContentLength(fileSize);
+  server_->send(200, "application/octet-stream", "");
+
+  uint8_t buf[512];
+  while (file.available()) {
+    size_t bytesRead = file.read(buf, sizeof(buf));
+    if (bytesRead == 0) break;
+    server_->client().write(buf, bytesRead);
+  }
+
+  file.close();
+}
+
+void PixelpaperWebServer::handleRename() {
+  if (!server_->hasArg("path") || !server_->hasArg("newName")) {
+    server_->send(400, "text/plain", "Missing path or newName");
+    return;
+  }
+
+  String itemPath = normalizeLegacyFontsPath(server_->arg("path"));
+  String newName = server_->arg("newName");
+
+  if (itemPath.isEmpty() || itemPath == "/" || newName.isEmpty() || itemPath.indexOf("..") >= 0) {
+    server_->send(400, "text/plain", "Invalid parameters");
+    return;
+  }
+
+  if (!itemPath.startsWith("/")) {
+    itemPath = "/" + itemPath;
+  }
+
+  // Security: reject path traversal and hidden names
+  if (newName.indexOf('/') >= 0 || newName.indexOf("..") >= 0 || newName.startsWith(".")) {
+    server_->send(400, "text/plain", "Invalid new name");
+    return;
+  }
+
+  // Security: block hidden/system files
+  String oldName = itemPath.substring(itemPath.lastIndexOf('/') + 1);
+  if (oldName.startsWith(".") || FsHelpers::isHiddenFsItem(oldName.c_str())) {
+    server_->send(403, "text/plain", "Cannot rename system files");
+    return;
+  }
+
+  if (!SdMan.exists(itemPath.c_str())) {
+    server_->send(404, "text/plain", "Item not found");
+    return;
+  }
+
+  // Build new path: same parent directory + new name
+  int lastSlash = itemPath.lastIndexOf('/');
+  String newPath = (lastSlash <= 0) ? "/" + newName : itemPath.substring(0, lastSlash) + "/" + newName;
+
+  if (SdMan.exists(newPath.c_str())) {
+    server_->send(400, "text/plain", "An item with that name already exists");
+    return;
+  }
+
+  if (SdMan.rename(itemPath.c_str(), newPath.c_str())) {
+    LOG_INF(TAG, "Renamed: %s -> %s", itemPath.c_str(), newPath.c_str());
+    server_->send(200, "text/plain", "Renamed");
+  } else {
+    server_->send(500, "text/plain", "Failed to rename");
+  }
+}
+
+}  // namespace pixelpaper

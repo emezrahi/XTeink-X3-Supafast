@@ -1,0 +1,9 @@
+{
+  "name": "Txt",
+  "version": "1.0.0",
+  "description": "Plain text format support",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "src"
+  }
+}

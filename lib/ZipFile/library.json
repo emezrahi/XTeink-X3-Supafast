@@ -1,0 +1,9 @@
+{
+  "name": "ZipFile",
+  "version": "1.0.0",
+  "description": "ZIP archive reading with streaming decompression",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "src"
+  }
+}

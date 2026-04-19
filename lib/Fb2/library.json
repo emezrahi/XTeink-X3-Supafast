@@ -1,0 +1,9 @@
+{
+  "name": "Fb2",
+  "version": "1.0.0",
+  "description": "FictionBook 2.0 format parsing",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "src"
+  }
+}

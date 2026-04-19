@@ -1,0 +1,14 @@
+{
+  "name": "expat",
+  "version": "2.7.3",
+  "description": "Expat XML parser",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "src",
+    "srcFilter": [
+      "+<xmlparse.c>",
+      "+<xmlrole.c>",
+      "+<xmltok.c>"
+    ]
+  }
+}

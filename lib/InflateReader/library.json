@@ -1,0 +1,9 @@
+{
+  "name": "InflateReader",
+  "version": "1.0.0",
+  "description": "Streaming inflate/decompress reader",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "src"
+  }
+}

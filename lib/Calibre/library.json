@@ -1,0 +1,16 @@
+{
+  "name": "Calibre",
+  "version": "1.0.0",
+  "description": "Calibre wireless sync protocol for ESP32",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "src",
+    "srcFilter": [
+      "+<calibre_common.c>",
+      "+<calibre_wireless.c>",
+      "+<calibre_network.c>",
+      "+<calibre_protocol.c>",
+      "+<calibre_storage_sdfat.cpp>"
+    ]
+  }
+}

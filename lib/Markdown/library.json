@@ -1,0 +1,9 @@
+{
+  "name": "Markdown",
+  "version": "1.0.0",
+  "description": "Markdown format parsing and rendering",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "src"
+  }
+}

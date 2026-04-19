@@ -1,0 +1,9 @@
+{
+  "name": "PngToBmpConverter",
+  "version": "1.0.0",
+  "description": "PNG to BMP image conversion",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "src"
+  }
+}

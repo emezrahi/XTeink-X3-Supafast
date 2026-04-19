@@ -1,0 +1,9 @@
+{
+  "name": "PageCache",
+  "version": "1.0.0",
+  "description": "Unified page caching with background pre-render",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "src"
+  }
+}

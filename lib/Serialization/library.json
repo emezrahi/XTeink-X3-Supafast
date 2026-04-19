@@ -1,0 +1,9 @@
+{
+  "name": "Serialization",
+  "version": "1.0.0",
+  "description": "Binary data serialization utilities",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "src"
+  }
+}

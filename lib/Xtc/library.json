@@ -1,0 +1,9 @@
+{
+  "name": "Xtc",
+  "version": "1.0.0",
+  "description": "XTC/XTCH native e-book format support",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "src"
+  }
+}

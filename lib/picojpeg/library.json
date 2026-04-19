@@ -1,0 +1,9 @@
+{
+  "name": "picojpeg",
+  "version": "1.0.0",
+  "description": "Tiny JPEG decoder",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "src"
+  }
+}

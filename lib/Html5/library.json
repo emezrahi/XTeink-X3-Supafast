@@ -1,0 +1,9 @@
+{
+  "name": "Html5",
+  "version": "1.0.0",
+  "description": "HTML5 normalization pre-processor for Expat XML parser",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "src"
+  }
+}

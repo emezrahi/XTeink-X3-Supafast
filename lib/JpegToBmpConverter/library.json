@@ -1,0 +1,9 @@
+{
+  "name": "JpegToBmpConverter",
+  "version": "1.0.0",
+  "description": "JPEG to BMP image conversion",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "src"
+  }
+}

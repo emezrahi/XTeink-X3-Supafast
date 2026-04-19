@@ -1,0 +1,9 @@
+{
+  "name": "RenderTypes",
+  "version": "1.0.0",
+  "description": "Shared rendering types: pages, text blocks, and layout engine",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "src"
+  }
+}

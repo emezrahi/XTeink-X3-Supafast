@@ -1,0 +1,9 @@
+{
+  "name": "FsHelpers",
+  "version": "1.0.0",
+  "description": "Filesystem path utilities",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "src"
+  }
+}
