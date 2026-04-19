@@ -10,6 +10,7 @@
 
 #include "../Battery.h"
 #include "../core/BootMode.h"
+#include <X3Detect.h>
 
 #define TAG "SETTINGS_UI"
 #include "../config.h"
@@ -639,8 +640,13 @@ void SettingsState::saveDeviceSettings() {
 void SettingsState::populateSystemInfo() {
   infoView_.clear();
 
-  // Firmware version
+  // About
+  infoView_.addField("Firmware", "PIXELPAGES");
   infoView_.addField("Version", PIXELPAPER_VERSION);
+  infoView_.addField("Commit", BUILD_GIT_HASH);
+  infoView_.addField("Built", BUILD_DATE " " BUILD_TIME);
+  infoView_.addField("Device", X3Detect::isX3() ? "Xteink X3" : "Xteink X4");
+  infoView_.addField("X3 Support", X3Detect::isX3() ? "Active" : "Not detected");
 
   // Uptime
   const unsigned long uptimeSeconds = millis() / 1000;
